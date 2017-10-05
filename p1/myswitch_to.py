@@ -19,12 +19,16 @@ class ForwardTable(object):
     def insert(self, ethaddr, intf_name):
         self._lock.acquire()
         if ethaddr in self._table:
+            log_debug ("FWT: cancel {}'s timer and reschedule".format(ethaddr))
             self._table[ethaddr][1].cancel()
+        else:
+            log_debug ("FWT: insert {}".format(ethaddr))
         self._table[ethaddr] = (intf_name, threading.Timer(ForwardTable.LIFESPAN, self.remove, (ethaddr,)) )
         self._table[ethaddr][1].start()
         self._lock.release()
 
     def remove(self, ethaddr):
+        log_debug("FWT: remove {}".format(ethaddr))
         self._lock.acquire()
         self._table.pop(ethaddr)
         self._lock.release()
@@ -56,8 +60,9 @@ def main(net):
         else:
             output_port = forward_table.lookup(packet[0].dst)
             if output_port is not None:
-                log_debug ("Send packet {} to {}".format(packet, output_port))
-                net.send_packet(output_port, packet)
+                if output_port != input_port:
+                    log_debug ("Send packet {} to {}".format(packet, output_port))
+                    net.send_packet(output_port, packet)
             else:
                 for intf in my_interfaces:
                     if input_port != intf.name:

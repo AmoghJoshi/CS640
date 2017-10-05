@@ -1,0 +1,14 @@
+range of number of interfaces and number of hosts
+
+packet define
+  Only Ethernet type
+  src det
+
+  src cannot be ff:ff:ff:ff:ff:ff
+  src == det ?
+
+eth0 (h1, h2)
+eth0 (h2, h1)
+eth0 (h1, 'ff:ff:ff:ff:ff:ff')
+
+eth0 (h1, h1)

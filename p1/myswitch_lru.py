@@ -59,8 +59,9 @@ def main(net):
         else:
             output_port = forward_table.lookup(packet[0].dst)
             if output_port is not None:
-                log_debug ("Send packet {} to {}".format(packet, output_port))
-                net.send_packet(output_port, packet)
+                if output_port != input_port:
+                    log_debug ("Send packet {} to {}".format(packet, output_port))
+                    net.send_packet(output_port, packet)
             else:
                 for intf in my_interfaces:
                     if input_port != intf.name:
