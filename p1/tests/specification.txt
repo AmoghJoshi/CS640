@@ -12,3 +12,8 @@ eth0 (h2, h1)
 eth0 (h1, 'ff:ff:ff:ff:ff:ff')
 
 eth0 (h1, h1)
+
+broadcast: flood to the src port?
+
+
+debug compile

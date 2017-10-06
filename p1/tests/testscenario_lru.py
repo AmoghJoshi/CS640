@@ -98,6 +98,7 @@ def switch_lru_tests():
     '''
     pkt12 = mk_pkt(hosts_eth[6], hosts_eth[6], hosts_ip[6], hosts_ip[6])
     s.expect(PacketInputEvent("eth3", pkt12, display=Ethernet), "An Ethernet frame ({} -> {}) should arrive on eth3".format(hosts_eth[6], hosts_eth[6]))
+    s.expect(PacketOutputEvent("eth3", pkt12, display=Ethernet), "The Ethernet frame destined to {} should be forwarded out ports eth1".format(hosts_eth[6]))
 
     pkt13 = mk_pkt(hosts_eth[4], hosts_eth[2], hosts_ip[4], hosts_ip[2])
     s.expect(PacketInputEvent("eth3", pkt13, display=Ethernet), "An Ethernet frame ({} -> {}) should arrive on eth3".format(hosts_eth[4], hosts_eth[2]))
@@ -152,7 +153,7 @@ def switch_lru_tests():
     pkt22 = mk_pkt(hosts_eth[3], hosts_eth[2], hosts_ip[3], hosts_ip[2])
     s.expect(PacketInputEvent("eth1", pkt22, display=Ethernet), "An Ethernet frame ({} -> {}) should arrive on eth1".format(hosts_eth[3], hosts_eth[2]))
     s.expect(PacketOutputEvent("eth0", pkt22, "eth2", pkt22, "eth3", pkt22, display=Ethernet), "The Ethernet frame destined to {} should be forwarded out ports eth0, eth2 and eth3".format(hosts_eth[2]))
-
     return s
+
 
 scenario = switch_lru_tests()
