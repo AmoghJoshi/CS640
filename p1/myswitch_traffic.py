@@ -31,10 +31,6 @@ def main(net):
 
         log_debug ("In {} received packet {} on {}".format(net.name, packet, input_port))
 
-        # first packet
-        #if len(forwarding_table) == 0:
-        #    forwarding_table.append([packet[0].src, input_port, 0])
-
         # special case 1: dst is broadcast address
         if str.lower(packet[0].dst.toStr()) == "ff:ff:ff:ff:ff:ff":
             log_info ("Packet intended for broadcast")
@@ -75,24 +71,12 @@ def main(net):
             forwarding_table[id_entry][2] += 1
             net.send_packet(forwarding_table[id_entry][1], packet)
         else: # no
-            # find the dst, flood to this port only
-            # flag = False
+            # flood to all ports except input port
             for intf in my_interfaces:
                 if  intf.name != input_port:
-                    # flag = True
                     log_info ("Output port found")
                     log_info ("Flooding packet {} to learned port {}".format(packet, intf.name))
                     net.send_packet(intf, packet)
-            # not find the dst from interfaces, flood to all ports except input port
-            #if flag == False:
-            #    log_info ("Output port not found")
-            #    log_info ("Flooding packet out all ports except input port")
-            #    for intf in my_interfaces:
-            #        if  intf.name != input_port:
-            #            log_debug ("Flooding packet {} to port {}".format(packet, intf.name))
-            #            net.send_packet(intf, packet)
-
 
     # shut down the switch when Shutdown exception is triggered
     net.shutdown()
-
