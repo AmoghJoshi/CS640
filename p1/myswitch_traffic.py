@@ -40,9 +40,9 @@ def main(net):
             log_info ("Packet intended for broadcast")
             log_info ("Flooding packet out all ports except input port")
             for intf in my_interfaces:
-                if  intf.ethaddr != input_port:
+                if  intf.name != input_port:
                     log_debug ("Flooding packet {} to port {}".format(packet, intf.name))
-                    net.send_packet(intf.ethaddr, packet)
+                    net.send_packet(intf, packet)
             continue
 
         # special case 2: ignore the packet if destined for the switch itself
@@ -73,26 +73,26 @@ def main(net):
         if packet[0].dst in srclist: # yes
             id_entry = srclist.index(packet[0].dst)
             forwarding_table[id_entry][2] += 1
-            net.send_packet(packet[0].dst, packet)
+            net.send_packet(forwarding_table[id_entry][1], packet)
         else: # no
             # find the dst, flood to this port only
-            flag = False
+            # flag = False
             for intf in my_interfaces:
-                if  intf.ethaddr == packet[0].dst:
-                    flag = True
+                if  intf.name != input_port:
+                    # flag = True
                     log_info ("Output port found")
                     log_info ("Flooding packet {} to learned port {}".format(packet, intf.name))
-                    net.send_packet(intf.ethaddr, packet)
-                    break
+                    net.send_packet(intf, packet)
             # not find the dst from interfaces, flood to all ports except input port
-            if flag == False:
-                log_info ("Output port not found")
-                log_info ("Flooding packet out all ports except input port")
-                for intf in my_interfaces:
-                    if  intf.ethaddr != input_port:
-                        log_debug ("Flooding packet {} to port {}".format(packet, intf.name))
-                        net.send_packet(intf.ethaddr, packet)
+            #if flag == False:
+            #    log_info ("Output port not found")
+            #    log_info ("Flooding packet out all ports except input port")
+            #    for intf in my_interfaces:
+            #        if  intf.name != input_port:
+            #            log_debug ("Flooding packet {} to port {}".format(packet, intf.name))
+            #            net.send_packet(intf, packet)
 
 
     # shut down the switch when Shutdown exception is triggered
     net.shutdown()
+
