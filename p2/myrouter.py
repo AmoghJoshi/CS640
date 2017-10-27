@@ -20,13 +20,16 @@ class Router(object):
 
     def process_arp(pkt, input_port):
         arp = pkt.get_header(Arp)
-        self.ip2eth[arp.senderprotoaddr] = arp.senderhwaddr # store the mapping
-        if arp.targetprotoaddr in self.ipaddrs:
-            # send the ARP response
-            arp_reply = create_ip_arp_reply(arp.senderhwaddr,
-                    self.net.interface_by_ipaddr(arp.targetprotoaddr).ethaddr,
-                    arp.senderprotoaddr, arp.targetprotoaddr)
-            self.net.send_packet(input_port, arp_reply)
+        # store the mapping, applicable for both REQUEST and REPLY
+        self.ip2eth[arp.senderprotoaddr] = arp.senderhwaddr
+        # REQUEST
+        if arp.operation == ArpOperation.Request:
+            if arp.targetprotoaddr in self.ipaddrs:
+                # send the ARP response
+                arp_reply = create_ip_arp_reply(arp.senderhwaddr,
+                        self.net.interface_by_ipaddr(arp.targetprotoaddr).ethaddr,
+                        arp.senderprotoaddr, arp.targetprotoaddr)
+                self.net.send_packet(input_port, arp_reply)
 
     def broadcast_arp_request(target_ip_addr):
         for intf in self.my_interfaces:
