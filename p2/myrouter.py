@@ -10,24 +10,6 @@ import time
 import threading
 from switchyard.lib.userlib import *
 
-next_tid = 0
-
-class ArpMapping(object):
-    def __init__(self):
-        self.ip2eth_lock = threading.Lock()
-        self.ip2eth = dict()
-
-    def put(self, arp):
-        self.ip2eth_lock.acquire()
-        self.ip2eth[arp.senderprotoaddr] = arp.senderhwaddr
-        self.ip2eth_lock.release()
-
-    def contains(self, ipv4_addr):
-        return ipv4_addr in self.ip2eth
-
-    def get(self, ipv4_addr):
-        return self.ip2eth[ipv4_addr]
-
 
 class ForwardTable(object):
     def __init__(self, path):
@@ -50,49 +32,18 @@ class ForwardTable(object):
                     matching_entry = (nexthop, eth_port, netwk.prefixlen)
         return matching_entry
 
-# Multithreading does not work!!!
-class BackgroundForwarding(threading.Thread):
-    def __init__(self, tid, net, arp_mapping, intf, next_hop, pending_pkt):
-        threading.Thread.__init__(self)
-        self.net = net
-        self._tid = tid
-        self._arp_mapping = arp_mapping
-        self._intf = intf
-        self._next_hop = next_hop
-        self._pending_pkt = pending_pkt
 
-    def run(self):
-        log_debug('start thread {}'.format(self._tid))
-        if not self._arp_mapping.contains(self._next_hop):
-            self.broadcast_arp_request(self._intf, self._next_hop)
-        self._pending_pkt[Ethernet].src = self._intf.ethaddr
-        self._pending_pkt[Ethernet].dst = self._arp_mapping.get(self._next_hop)
-        self.net.send_packet(self._intf.name, self._pending_pkt)
-
-    def broadcast_arp_request(self, intf, target_ip_addr):
-        arp_req = create_ip_arp_request(intf.ethaddr, intf.ipaddr, target_ip_addr)
-        self.net.send_packet(intf.name, arp_req)
-        count = 0
-        gotpkt = False
-        while count < 5 and not gotpkt:
-            try:
-                timestamp,dev,pkt = self.net.recv_packet(timeout=1.0)
-                if pkt.has_header(Arp):
-                    arp_hdr = pkt.get_header(Arp)
-                    if arp_hdr.operation == Arp.Reply and arp_hdr.senderprotoaddr == target_ip_addr:
-                        self._arp_mapping.put(arp_hdr)
-                        gotpkt = True
-                        log_debug("thread {} received the pending arp reply".format(self._tid))
-            except NoPackets:
-                log_debug("No packets available in recv_packet. {}th attempt.".format(count+1))
-            except Shutdown:
-                log_debug("Got shutdown signal")
-                return
-            finally:
-                count += 1
+class PendingPacket(object):
+    def __init__(self, pkt, timestamp, count, out_intf):
+        self.pkt = pkt
+        self.timestamp = timestamp
+        self.count = count
+        self.out_intf = out_intf
 
 
 class Router(object):
+    TIMEOUT_INTERVAL = 0.1
+
     def __init__(self, net):
         self.net = net
         self.my_interfaces = net.interfaces()
@@ -102,47 +53,65 @@ class Router(object):
         # other initialization stuff here
         self.ethaddrs = set([intf.ethaddr for intf in self.my_interfaces])
         self.ipaddrs = set([intf.ipaddr for intf in self.my_interfaces])
-        self.arp_mapping = ArpMapping()
-        self.bg_threads = []
+        self.arp_mapping = dict()
+        self.pending_pkts = dict()      # <dst, set[PendingPacket]>
         if os.path.exists('forwarding_table.txt'):
             self.fwd_table = ForwardTable('forwarding_table.txt')
 
     def process_arp(self, pkt, input_port):
         arp = pkt.get_header(Arp)
         # store the mapping, applicable for both REQUEST and REPLY
-        self.arp_mapping.put(arp)
-        # REQUEST
-        if arp.operation == ArpOperation.Request:
+        self.arp_mapping[arp.senderprotoaddr] = arp.senderhwaddr
+        if arp.operation == ArpOperation.Request:   # REQUEST
             if arp.targetprotoaddr in self.ipaddrs:
                 # send the ARP response
                 arp_reply = create_ip_arp_reply(
                         self.net.interface_by_ipaddr(arp.targetprotoaddr).ethaddr,
                         arp.senderhwaddr, arp.targetprotoaddr, arp.senderprotoaddr)
                 self.net.send_packet(input_port, arp_reply)
+        else:       # REPLY
+            if arp.senderprotoaddr in self.pending_pkts:
+                cur_pending_pkts = self.pending_pkts[arp.senderprotoaddr]
+                intf = self.net.interface_by_name(input_port)
+                for cur_pending_pkt in cur_pending_pkts:
+                    self.forwarding_ip_packet(cur_pending_pkt.pkt, intf)
+                del self.pending_pkts[arp.senderprotoaddr]
+
+    def forwarding_ip_packet(self, pkt, intf):
+        pkt[Ethernet].src = intf.ethaddr
+        pkt[Ethernet].dst = self.arp_mapping[pkt.get_header(IPv4).dst]
+        self.net.send_packet(intf.name, pkt)
 
     def process_ipv4(self, pkt, input_port):
         global next_tid
         ip_hdr = pkt.get_header(IPv4)
-        ip_hdr.ttl = ip_hdr.ttl - 1
+        ip_hdr.ttl = ip_hdr.ttl - 1   # what if ttl == 0?
         if ip_hdr.dst in self.ipaddrs:
             return # drop the packet intended for the router
         # import pdb; pdb.set_trace()
         # first check the interfaces
+        intf = None
         for intf0 in self.my_interfaces:
             if int(ip_hdr.dst) & int(intf0.netmask) == int(intf0.ipaddr) & int(intf0.netmask):
                 next_hop = ip_hdr.dst
                 intf = intf0
                 break
-        else:
+        # then lookup in the forwarding table
+        if intf is None:
             match_entry = self.fwd_table.lookup(ip_hdr.dst)
             if match_entry is None:
+                log_info('pkt {} mismatched. Dropped'.format(ip_hdr))
                 return # drop if mismatch
-            # forwarding
             next_hop, eth_port, _ = match_entry
             intf = self.net.interface_by_name(eth_port)
-        self.bg_threads.append(BackgroundForwarding(next_tid, self.net, self.arp_mapping, intf, next_hop, pkt))
-        next_tid += 1
-        self.bg_threads[-1].start()
+        if next_hop not in self.arp_mapping:
+            pending_packet = PendingPacket(pkt, time.time() - 2, 0, intf)
+            if next_hop in self.pending_pkts:
+                self.pending_pkts[next_hop].add(pending_packet)
+            else:
+                self.pending_pkts[next_hop] = {pending_packet}
+        else:
+            self.forwarding_ip_packet(pkt, intf)
 
     def process_packet(self, pkt, input_port):
         if pkt.has_header(Arp):
@@ -152,6 +121,10 @@ class Router(object):
             log_debug("{} has an IPv4 header".format(pkt))
             self.process_ipv4(pkt, input_port)
 
+    def broadcast_arp_request(self, intf, target_ip_addr):
+        arp_req = create_ip_arp_request(intf.ethaddr, intf.ipaddr, target_ip_addr)
+        self.net.send_packet(intf.name, arp_req)
+
     def router_main(self):
         '''
         Main method for router; we stay in a loop in this method, receiving
@@ -159,8 +132,27 @@ class Router(object):
         '''
         while True:
             gotpkt = True
+            time_now = time.time()
+            remove_list = set()
             try:
-                timestamp,dev,pkt = self.net.recv_packet(timeout=1.0)
+                for tar_ip_addr, pending_pkt_set in self.pending_pkts.items():
+                    for pending_pkt in pending_pkt_set:
+                        if pending_pkt.timestamp + 1 < time_now:  # time to broadcast again
+                            if pending_pkt.count < 5:
+                                pending_pkt.count += 1
+                                pending_pkt.timestamp = time_now
+                                log_debug('broadcast {} {}th attempt'.format(pending_pkt.pkt, pending_pkt.count))
+                                self.broadcast_arp_request(pending_pkt.out_intf, tar_ip_addr)
+                            else:
+                                log_debug('arp failed five times. drop pkt {}'.format(pending_pkt))
+                                remove_list.add(pending_pkt)
+                    pending_pkt_set = pending_pkt_set - remove_list
+                    if not pending_pkt_set:
+                        del self.pending_pkts[tar_ip_addr]
+                    else:
+                        self.pending_pkts[tar_ip_addr] = pending_pkt_set
+
+                timestamp,dev,pkt = self.net.recv_packet(timeout=Router.TIMEOUT_INTERVAL)
             except NoPackets:
                 log_debug("No packets available in recv_packet")
                 gotpkt = False
@@ -172,7 +164,6 @@ class Router(object):
                 log_debug("Got a packet: {}".format(str(pkt)))
 
             self.process_packet(pkt, dev)
-
 
 
 def main(net):
