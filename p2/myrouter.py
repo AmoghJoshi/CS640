@@ -37,8 +37,10 @@ class ForwardTable(object):
                     IPv4Address(items[2]), items[3]
         with open(path, 'r') as f:
             text = f.read()
-            self.table = list(map(parse_entry, text.split('\n')))
-            print(self.table)
+        print('raw forward table:')
+        print(text)
+        self.table = list(map(parse_entry, text.split('\n')))
+        print(self.table)
 
     def lookup(self, ipv4_addr):
         matching_entry = None
@@ -48,7 +50,7 @@ class ForwardTable(object):
                     matching_entry = (nexthop, eth_port, netwk.prefixlen)
         return matching_entry
 
-
+# Multithreading does not work!!!
 class BackgroundForwarding(threading.Thread):
     def __init__(self, tid, net, arp_mapping, intf, next_hop, pending_pkt):
         threading.Thread.__init__(self)
@@ -61,10 +63,10 @@ class BackgroundForwarding(threading.Thread):
 
     def run(self):
         log_debug('start thread {}'.format(self._tid))
-        if self._arp_mapping.contains(self._next_hop):
+        if not self._arp_mapping.contains(self._next_hop):
             self.broadcast_arp_request(self._intf, self._next_hop)
-        pkt[Ethernet].src = self._intf.ethaddr
-        pkt[Ethernet].dst = self._arp_mapping.get(self._next_hop)
+        self._pending_pkt[Ethernet].src = self._intf.ethaddr
+        self._pending_pkt[Ethernet].dst = self._arp_mapping.get(self._next_hop)
         self.net.send_packet(self._intf.name, self._pending_pkt)
 
     def broadcast_arp_request(self, intf, target_ip_addr):
@@ -77,8 +79,10 @@ class BackgroundForwarding(threading.Thread):
                 timestamp,dev,pkt = self.net.recv_packet(timeout=1.0)
                 if pkt.has_header(Arp):
                     arp_hdr = pkt.get_header(Arp)
-                    if arp_hdr.operation = Arp.Reply and arp_hdr.senderprotoaddr == target_ip_addr:
+                    if arp_hdr.operation == Arp.Reply and arp_hdr.senderprotoaddr == target_ip_addr:
+                        self._arp_mapping.put(arp_hdr)
                         gotpkt = True
+                        log_debug("thread {} received the pending arp reply".format(self._tid))
             except NoPackets:
                 log_debug("No packets available in recv_packet. {}th attempt.".format(count+1))
             except Shutdown:
@@ -86,13 +90,15 @@ class BackgroundForwarding(threading.Thread):
                 return
             finally:
                 count += 1
-        self.process_arp(pkt, dev)
 
 
 class Router(object):
     def __init__(self, net):
         self.net = net
         self.my_interfaces = net.interfaces()
+        print('interfaces')
+        for intf in self.my_interfaces:
+            print(intf)
         # other initialization stuff here
         self.ethaddrs = set([intf.ethaddr for intf in self.my_interfaces])
         self.ipaddrs = set([intf.ipaddr for intf in self.my_interfaces])
@@ -115,21 +121,28 @@ class Router(object):
                 self.net.send_packet(input_port, arp_reply)
 
     def process_ipv4(self, pkt, input_port):
-        pkt.ttl = pkt.ttl - 1
+        global next_tid
         ip_hdr = pkt.get_header(IPv4)
+        ip_hdr.ttl = ip_hdr.ttl - 1
         if ip_hdr.dst in self.ipaddrs:
             return # drop the packet intended for the router
-        self.match_entry = self.fwd_table.lookup(ip_hdr.dst)
-        if self.match_entry is None:
-            return # drop if mismatch
-        # forwarding
-        next_hop, eth_port, _ = match_entry
-        intf = self.net.interface_by_name(eth_port)
+        # import pdb; pdb.set_trace()
+        # first check the interfaces
+        for intf0 in self.my_interfaces:
+            if int(ip_hdr.dst) & int(intf0.netmask) == int(intf0.ipaddr) & int(intf0.netmask):
+                next_hop = ip_hdr.dst
+                intf = intf0
+                break
+        else:
+            match_entry = self.fwd_table.lookup(ip_hdr.dst)
+            if match_entry is None:
+                return # drop if mismatch
+            # forwarding
+            next_hop, eth_port, _ = match_entry
+            intf = self.net.interface_by_name(eth_port)
         self.bg_threads.append(BackgroundForwarding(next_tid, self.net, self.arp_mapping, intf, next_hop, pkt))
         next_tid += 1
         self.bg_threads[-1].start()
-
-
 
     def process_packet(self, pkt, input_port):
         if pkt.has_header(Arp):
