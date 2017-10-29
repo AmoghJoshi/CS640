@@ -33,16 +33,19 @@ class ForwardTable(object):
         return matching_entry
 
 
-class PendingPacket(object):
+class PendingPackets(object):
     def __init__(self, pkt, timestamp, count, out_intf):
-        self.pkt = pkt
+        self.pkts = [pkt]
         self.timestamp = timestamp
         self.count = count
         self.out_intf = out_intf
 
+    def add(self, pkt):
+        self.pkts.append(pkt)
+
 
 class Router(object):
-    TIMEOUT_INTERVAL = 0.1
+    TIMEOUT_INTERVAL = 1
 
     def __init__(self, net):
         self.net = net
@@ -54,7 +57,7 @@ class Router(object):
         self.ethaddrs = set([intf.ethaddr for intf in self.my_interfaces])
         self.ipaddrs = set([intf.ipaddr for intf in self.my_interfaces])
         self.arp_mapping = dict()
-        self.pending_pkts = dict()      # <dst, set[PendingPacket]>
+        self.pending_pkts = dict()      # <dst, list[PendingPackets]>
         if os.path.exists('forwarding_table.txt'):
             self.fwd_table = ForwardTable('forwarding_table.txt')
 
@@ -69,21 +72,20 @@ class Router(object):
                         self.net.interface_by_ipaddr(arp.targetprotoaddr).ethaddr,
                         arp.senderhwaddr, arp.targetprotoaddr, arp.senderprotoaddr)
                 self.net.send_packet(input_port, arp_reply)
-        else:       # REPLY
-            if arp.senderprotoaddr in self.pending_pkts:
-                cur_pending_pkts = self.pending_pkts[arp.senderprotoaddr]
-                intf = self.net.interface_by_name(input_port)
-                for cur_pending_pkt in cur_pending_pkts:
-                    self.forwarding_ip_packet(cur_pending_pkt.pkt, intf)
-                del self.pending_pkts[arp.senderprotoaddr]
+        # process pending packets
+        if arp.senderprotoaddr in self.pending_pkts:
+            cur_pending_pkts = self.pending_pkts[arp.senderprotoaddr]
+            intf = self.net.interface_by_name(input_port)
+            for cur_pending_pkt in cur_pending_pkts.pkts:
+                self.forwarding_ip_packet(cur_pending_pkt, intf, arp.senderprotoaddr)
+            del self.pending_pkts[arp.senderprotoaddr]
 
-    def forwarding_ip_packet(self, pkt, intf):
+    def forwarding_ip_packet(self, pkt, intf, nexthop_ipaddr):
         pkt[Ethernet].src = intf.ethaddr
-        pkt[Ethernet].dst = self.arp_mapping[pkt.get_header(IPv4).dst]
+        pkt[Ethernet].dst = self.arp_mapping[nexthop_ipaddr]
         self.net.send_packet(intf.name, pkt)
 
     def process_ipv4(self, pkt, input_port):
-        global next_tid
         ip_hdr = pkt.get_header(IPv4)
         ip_hdr.ttl = ip_hdr.ttl - 1   # what if ttl == 0?
         if ip_hdr.dst in self.ipaddrs:
@@ -105,13 +107,12 @@ class Router(object):
             next_hop, eth_port, _ = match_entry
             intf = self.net.interface_by_name(eth_port)
         if next_hop not in self.arp_mapping:
-            pending_packet = PendingPacket(pkt, time.time() - 2, 0, intf)
             if next_hop in self.pending_pkts:
-                self.pending_pkts[next_hop].add(pending_packet)
+                self.pending_pkts[next_hop].add(pkt)
             else:
-                self.pending_pkts[next_hop] = {pending_packet}
+                self.pending_pkts[next_hop] = PendingPackets(pkt, time.time() - 2, 0, intf)
         else:
-            self.forwarding_ip_packet(pkt, intf)
+            self.forwarding_ip_packet(pkt, intf, next_hop)
 
     def process_packet(self, pkt, input_port):
         if pkt.has_header(Arp):
@@ -131,30 +132,27 @@ class Router(object):
         packets until the end of time.
         '''
         while True:
-            gotpkt = True
             time_now = time.time()
-            remove_list = set()
-            try:
-                for tar_ip_addr, pending_pkt_set in self.pending_pkts.items():
-                    for pending_pkt in pending_pkt_set:
-                        if pending_pkt.timestamp + 1 < time_now:  # time to broadcast again
-                            if pending_pkt.count < 5:
-                                pending_pkt.count += 1
-                                pending_pkt.timestamp = time_now
-                                log_debug('broadcast {} {}th attempt'.format(pending_pkt.pkt, pending_pkt.count))
-                                self.broadcast_arp_request(pending_pkt.out_intf, tar_ip_addr)
-                            else:
-                                log_debug('arp failed five times. drop pkt {}'.format(pending_pkt))
-                                remove_list.add(pending_pkt)
-                    pending_pkt_set = pending_pkt_set - remove_list
-                    if not pending_pkt_set:
-                        del self.pending_pkts[tar_ip_addr]
+            remove_list = []
+            for tar_ip_addr, pending_pkt in self.pending_pkts.items():
+                # import pdb; pdb.set_trace()
+                if pending_pkt.timestamp + 1 < time_now:  # time to broadcast again
+                    if pending_pkt.count < 5:
+                        pending_pkt.count += 1
+                        pending_pkt.timestamp = time_now
+                        log_info('broadcast ARP req to {} {}th attempt'.format(tar_ip_addr, pending_pkt.count))
+                        self.broadcast_arp_request(pending_pkt.out_intf, tar_ip_addr)
                     else:
-                        self.pending_pkts[tar_ip_addr] = pending_pkt_set
+                        remove_list.append(tar_ip_addr)
+                        log_info('arp to {} failed five times. drop all packets'.format(tar_ip_addr))
+            for ipaddr in remove_list:
+                del self.pending_pkts[ipaddr]
 
+            gotpkt = True
+            try:
                 timestamp,dev,pkt = self.net.recv_packet(timeout=Router.TIMEOUT_INTERVAL)
             except NoPackets:
-                log_debug("No packets available in recv_packet")
+                log_info("No packets available in recv_packet")
                 gotpkt = False
             except Shutdown:
                 log_debug("Got shutdown signal")
@@ -162,8 +160,7 @@ class Router(object):
 
             if gotpkt:
                 log_debug("Got a packet: {}".format(str(pkt)))
-
-            self.process_packet(pkt, dev)
+                self.process_packet(pkt, dev)
 
 
 def main(net):
