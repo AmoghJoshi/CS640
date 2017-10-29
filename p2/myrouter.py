@@ -105,16 +105,31 @@ class Router(object):
 
     def process_ipv4(self, pkt, input_port):
         ip_hdr = pkt.get_header(IPv4)
-        ip_hdr.ttl = ip_hdr.ttl - 1   # what if ttl == 0?
         if ip_hdr.dst in self.ipaddrs:
-            if pkt.has_header(ICMP):
+            if pkt.has_header(ICMP) and pkt[ICMP].icmptype == ICMPType.EchoRequest:
                 self.process_icmp(pkt, input_port)
+            else:
+                payload = pkt.to_bytes()[:28]
+                self.send_icmp_error(ip_hdr.src, payload, ICMPType.DestinationUnreachable,
+                        ICMPCodeDestinationUnreachable.PortUnreachable)
             return # drop the packet intended for the router
         # import pdb; pdb.set_trace()
         # first check the interfaces
         intf, next_hop = self.make_forward_decision(ip_hdr)
+
         if next_hop is None:
-            return # drop packets not matching the forward table
+            # drop packets not matching the forward table
+            payload = pkt.to_bytes()[:28]
+            self.send_icmp_error(ip_hdr.src, payload, ICMPType.DestinationUnreachable,
+                    ICMPCodeDestinationUnreachable.NetworkUnreachable)
+            return
+        ip_hdr.ttl = ip_hdr.ttl - 1
+        if ip_hdr.ttl == 0:
+            payload = pkt.to_bytes()[:28]
+            self.send_icmp_error(ip_hdr.src, payload, ICMPType.TimeExceeded,
+                   ICMPCodeTimeExceed.TTLExpired)
+            return
+
         if next_hop not in self.arp_mapping:
             if next_hop in self.pending_pkts:
                 self.pending_pkts[next_hop].add(pkt)
@@ -148,6 +163,28 @@ class Router(object):
             else:
                 self.forwarding_ip_packet(pkt, intf, next_hop)
 
+    def send_icmp_error(self, ipaddr_src, original_data, icmptype, icmpcode):
+        intf, next_hop = self.make_forward_decision(ipaddr_src)
+        if next_hop is None:
+            log_info('The router cannot find a path to the src {}'.format(ipaddr_src))
+            return
+        # make the packet
+        ether = Ethernet()
+        ether.src = intf.ethaddr
+        ether.ethertype = EtherType.IP
+        ippkt = IPv4()
+        ippkt.src = intf.ipaddr
+        ippkt.dst = ipaddr_src
+        ippkt.protocol = IPProtocol.ICMP
+        ippkt.ttl = 64
+        icmppkt = ICMP()
+        icmppkt.icmptype = icmptype
+        icmppkt.icmpcode = icmpcode
+        # icmppkt.icmpdata.sequence = ?
+        icmppkt.icmpdata.data = original_data[:28]
+        newpkt = ether + ippkt + icmppkt
+        self.net.send_packet(intf.name, newpkt)
+
     def process_packet(self, pkt, input_port):
         if pkt.has_header(Arp):
             log_debug("{} has an ARP header".format(pkt))
@@ -177,6 +214,7 @@ class Router(object):
                         log_info('broadcast ARP req to {} {}th attempt'.format(tar_ip_addr, pending_pkt.count))
                         self.broadcast_arp_request(pending_pkt.out_intf, tar_ip_addr)
                     else:
+                        # TODO: send an ICMP error to each source
                         remove_list.append(tar_ip_addr)
                         log_info('arp to {} failed five times. drop all packets'.format(tar_ip_addr))
             for ipaddr in remove_list:
