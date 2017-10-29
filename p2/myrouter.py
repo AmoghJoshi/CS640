@@ -21,7 +21,7 @@ class ForwardTable(object):
             text = f.read()
         print('raw forward table:')
         print(text)
-        self.table = list(map(parse_entry, text.split('\n')))
+        self.table = list(map(parse_entry, filter(None, text.split('\n')) ))
         print(self.table)
 
     def lookup(self, ipv4_addr):
