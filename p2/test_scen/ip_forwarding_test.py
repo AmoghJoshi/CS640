@@ -150,17 +150,21 @@ def ip_forwarding_tests():
         s.expect(PacketOutputEvent(intfs[1].name, pkt21, display=Arp), "Router should send ARP request for {} on {} for the {}th time".format(hosts1[2].ip_addr, intfs[1].name, i+3))
     s.expect(PacketInputTimeoutEvent(1), 'wait 1s.')
 
+    # receive the ARP request, but too late to act
+    pkt24 = create_ip_arp_reply(hosts1[2].eth_addr, intfs[1].ethaddr, hosts1[2].ip_addr, intfs[1].ipaddr)
+    s.expect(PacketInputEvent(intfs[1].name, pkt24, display=Arp), "Router should receive ARP response for {} on {}".format(hosts1[2].ip_addr, intfs[1].name))
+
     '''
     test case 5: Packets intended for the Router
     '''
-    pkt24 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, intfs[1].ipaddr)
-    s.expect(PacketInputEvent(intfs[0].name, pkt24, display=IPv4), "IP packet to be forward to {} should arrive on {}. This packet is intended for one interface of the router and should be dropped".format(hosts0[2].ip_addr, intfs[0].name))
+    pkt25 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, intfs[1].ipaddr, reply=True)
+    s.expect(PacketInputEvent(intfs[0].name, pkt25, display=IPv4), "IP packet to be forward to {} should arrive on {}. This packet is intended for one interface of the router and should be dropped".format(hosts0[2].ip_addr, intfs[0].name))
 
     '''
     test case 6: Packets cannot find an out port in the forward table
     '''
-    pkt25 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, '192.168.40.20')
-    s.expect(PacketInputEvent(intfs[0].name, pkt25, display=IPv4), "IP packet to be forward to {} should arrive on {}. The destination ip addr is unknown and the packet should be dropped".format(hosts0[2].ip_addr, intfs[0].name))
+    pkt26 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, '192.168.40.20')
+    s.expect(PacketInputEvent(intfs[0].name, pkt26, display=IPv4), "IP packet to be forward to {} should arrive on {}. The destination ip addr is unknown and the packet should be dropped".format(hosts0[2].ip_addr, intfs[0].name))
 
     return s
 

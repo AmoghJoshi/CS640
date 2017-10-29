@@ -62,7 +62,7 @@ def mk_ping(hwsrc, hwdst, ipsrc, ipdst, reply=False, ttl=64, payload=''):
         icmppkt.icmpcode = ICMPCodeEchoRequest.EchoRequest
     icmppkt.icmpdata.sequence = 42
     icmppkt.icmpdata.data = payload
-    return ether + ippkt + icmppkt 
+    return ether + ippkt + icmppkt
 
 def mk_icmperr(hwsrc, hwdst, ipsrc, ipdst, xtype, xcode=0, origpkt=None, ttl=64):
     ether = Ethernet()
@@ -86,7 +86,7 @@ def mk_icmperr(hwsrc, hwdst, ipsrc, ipdst, xtype, xcode=0, origpkt=None, ttl=64)
         icmppkt.icmpdata.data = xpkt.to_bytes()[:28]
         icmppkt.icmpdata.origdgramlen = len(xpkt)
 
-    return ether + ippkt + icmppkt 
+    return ether + ippkt + icmppkt
 
 def mk_udp(hwsrc, hwdst, ipsrc, ipdst, ttl=64, srcport=10000, dstport=10000, payload=''):
     ether = Ethernet()

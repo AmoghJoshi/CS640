@@ -8,6 +8,7 @@ import sys
 import os
 import time
 import threading
+import copy
 from switchyard.lib.userlib import *
 
 
@@ -85,14 +86,8 @@ class Router(object):
         pkt[Ethernet].dst = self.arp_mapping[nexthop_ipaddr]
         self.net.send_packet(intf.name, pkt)
 
-    def process_ipv4(self, pkt, input_port):
-        ip_hdr = pkt.get_header(IPv4)
-        ip_hdr.ttl = ip_hdr.ttl - 1   # what if ttl == 0?
-        if ip_hdr.dst in self.ipaddrs:
-            return # drop the packet intended for the router
-        # import pdb; pdb.set_trace()
-        # first check the interfaces
-        intf = None
+    def make_forward_decision(self, ip_hdr):
+        intf, next_hop = None, None
         for intf0 in self.my_interfaces:
             if int(ip_hdr.dst) & int(intf0.netmask) == int(intf0.ipaddr) & int(intf0.netmask):
                 next_hop = ip_hdr.dst
@@ -103,9 +98,23 @@ class Router(object):
             match_entry = self.fwd_table.lookup(ip_hdr.dst)
             if match_entry is None:
                 log_info('pkt {} mismatched. Dropped'.format(ip_hdr))
-                return # drop if mismatch
-            next_hop, eth_port, _ = match_entry
-            intf = self.net.interface_by_name(eth_port)
+            else:
+                next_hop, eth_port, _ = match_entry
+                intf = self.net.interface_by_name(eth_port)
+        return intf, next_hop
+
+    def process_ipv4(self, pkt, input_port):
+        ip_hdr = pkt.get_header(IPv4)
+        ip_hdr.ttl = ip_hdr.ttl - 1   # what if ttl == 0?
+        if ip_hdr.dst in self.ipaddrs:
+            if pkt.has_header(ICMP):
+                self.process_icmp(pkt, input_port)
+            return # drop the packet intended for the router
+        # import pdb; pdb.set_trace()
+        # first check the interfaces
+        intf, next_hop = self.make_forward_decision(ip_hdr)
+        if next_hop is None:
+            return # drop packets not matching the forward table
         if next_hop not in self.arp_mapping:
             if next_hop in self.pending_pkts:
                 self.pending_pkts[next_hop].add(pkt)
@@ -113,6 +122,31 @@ class Router(object):
                 self.pending_pkts[next_hop] = PendingPackets(pkt, time.time() - 2, 0, intf)
         else:
             self.forwarding_ip_packet(pkt, intf, next_hop)
+
+    def process_icmp(self, pkt, input_port):
+        icmp_hdr = pkt.get_header(ICMP)
+        # import pdb; pdb.set_trace()
+        if icmp_hdr.icmptype == ICMPType.EchoRequest:
+            seq = icmp_hdr.icmpdata.sequence
+            data = copy.deepcopy(icmp_hdr.icmpdata.data)
+            icmp_hdr.icmptype = ICMPType.EchoReply
+            icmp_hdr.icmpcode = ICMPCodeEchoReply.EchoReply
+            icmp_hdr.icmpdata.sequence = seq
+            icmp_hdr.icmpdata.data = data
+            ip_hdr = pkt.get_header(IPv4)
+            ip_hdr.dst, ip_hdr.src = ip_hdr.src, ip_hdr.dst
+            ip_hdr.ttl = 64
+            # lookup the forwarding table
+            intf, next_hop = self.make_forward_decision(ip_hdr)
+            if next_hop is None:
+                return
+            if next_hop not in self.arp_mapping:
+                if next_hop in self.pending_pkts:
+                    self.pending_pkts[next_hop].add(pkt)
+                else:
+                    self.pending_pkts[next_hop] = PendingPackets(pkt, time.time() - 2, 0, intf)
+            else:
+                self.forwarding_ip_packet(pkt, intf, next_hop)
 
     def process_packet(self, pkt, input_port):
         if pkt.has_header(Arp):
