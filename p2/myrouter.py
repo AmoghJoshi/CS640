@@ -8,6 +8,7 @@ import sys
 import os
 import time
 import threading
+import copy
 from switchyard.lib.userlib import *
 
 
@@ -85,27 +86,47 @@ class Router(object):
         pkt[Ethernet].dst = self.arp_mapping[nexthop_ipaddr]
         self.net.send_packet(intf.name, pkt)
 
-    def process_ipv4(self, pkt, input_port):
-        ip_hdr = pkt.get_header(IPv4)
-        ip_hdr.ttl = ip_hdr.ttl - 1   # what if ttl == 0?
-        if ip_hdr.dst in self.ipaddrs:
-            return # drop the packet intended for the router
-        # import pdb; pdb.set_trace()
-        # first check the interfaces
-        intf = None
+    def make_forward_decision(self, dst_ipaddr):
+        intf, next_hop = None, None
         for intf0 in self.my_interfaces:
-            if int(ip_hdr.dst) & int(intf0.netmask) == int(intf0.ipaddr) & int(intf0.netmask):
-                next_hop = ip_hdr.dst
+            if int(dst_ipaddr) & int(intf0.netmask) == int(intf0.ipaddr) & int(intf0.netmask):
+                next_hop = dst_ipaddr
                 intf = intf0
                 break
         # then lookup in the forwarding table
         if intf is None:
-            match_entry = self.fwd_table.lookup(ip_hdr.dst)
+            match_entry = self.fwd_table.lookup(dst_ipaddr)
             if match_entry is None:
-                log_info('pkt {} mismatched. Dropped'.format(ip_hdr))
-                return # drop if mismatch
-            next_hop, eth_port, _ = match_entry
-            intf = self.net.interface_by_name(eth_port)
+                log_info('pkt with dst {} mismatched. Dropped'.format(dst_ipaddr))
+            else:
+                next_hop, eth_port, _ = match_entry
+                intf = self.net.interface_by_name(eth_port)
+        return intf, next_hop
+
+    def process_ipv4(self, pkt, input_port):
+        ip_hdr = pkt.get_header(IPv4)
+        if ip_hdr.dst in self.ipaddrs:
+            if pkt.has_header(ICMP) and pkt[ICMP].icmptype == ICMPType.EchoRequest:
+                self.process_icmp(pkt, input_port)
+            else:
+                self.send_icmp_error(pkt, ICMPType.DestinationUnreachable,
+                        ICMPCodeDestinationUnreachable.PortUnreachable)
+            return # drop the packet intended for the router
+        # import pdb; pdb.set_trace()
+        # first check the interfaces
+        intf, next_hop = self.make_forward_decision(ip_hdr.dst)
+
+        if next_hop is None:
+            # drop packets not matching the forward table
+            self.send_icmp_error(pkt, ICMPType.DestinationUnreachable,
+                    ICMPCodeDestinationUnreachable.NetworkUnreachable)
+            return
+        ip_hdr.ttl = ip_hdr.ttl - 1
+        if ip_hdr.ttl <= 0:
+            self.send_icmp_error(pkt, ICMPType.TimeExceeded,
+                   ICMPCodeTimeExceeded.TTLExpired)
+            return
+
         if next_hop not in self.arp_mapping:
             if next_hop in self.pending_pkts:
                 self.pending_pkts[next_hop].add(pkt)
@@ -113,6 +134,66 @@ class Router(object):
                 self.pending_pkts[next_hop] = PendingPackets(pkt, time.time() - 2, 0, intf)
         else:
             self.forwarding_ip_packet(pkt, intf, next_hop)
+
+    def process_icmp(self, pkt, input_port):
+        icmp_hdr = pkt.get_header(ICMP)
+        # import pdb; pdb.set_trace()
+        if icmp_hdr.icmptype == ICMPType.EchoRequest:
+            seq = icmp_hdr.icmpdata.sequence
+            data = copy.deepcopy(icmp_hdr.icmpdata.data)
+            icmp_hdr.icmptype = ICMPType.EchoReply
+            icmp_hdr.icmpcode = ICMPCodeEchoReply.EchoReply
+            icmp_hdr.icmpdata.sequence = seq
+            icmp_hdr.icmpdata.data = data
+            ip_hdr = pkt.get_header(IPv4)
+            ip_hdr.dst, ip_hdr.src = ip_hdr.src, ip_hdr.dst
+            ip_hdr.ttl = 64
+            # lookup the forwarding table
+            intf, next_hop = self.make_forward_decision(ip_hdr.dst)
+            if next_hop is None:
+                return
+            if next_hop not in self.arp_mapping:
+                if next_hop in self.pending_pkts:
+                    self.pending_pkts[next_hop].add(pkt)
+                else:
+                    self.pending_pkts[next_hop] = PendingPackets(pkt, time.time() - 2, 0, intf)
+            else:
+                self.forwarding_ip_packet(pkt, intf, next_hop)
+
+    def send_icmp_error(self, origpkt, icmptype, icmpcode):
+        origip = origpkt[IPv4]
+        intf, next_hop = self.make_forward_decision(origip.src)
+        if next_hop is None:
+            log_info('The router cannot find a path to the src {}'.format(origip.src))
+            return
+        # make the packet
+        ether = Ethernet()
+        ether.src = intf.ethaddr
+        ether.ethertype = EtherType.IP
+        ippkt = IPv4()
+        ippkt.src = intf.ipaddr
+        ippkt.dst = origip.src
+        ippkt.protocol = IPProtocol.ICMP
+        ippkt.ttl = 64
+        icmppkt = ICMP()
+        icmppkt.icmptype = icmptype
+        icmppkt.icmpcode = icmpcode
+        if origpkt is not None:
+            xpkt = deepcopy(origpkt)
+            i = xpkt.get_header_index(Ethernet)
+            if i >= 0:
+                del xpkt[i]
+            icmppkt.icmpdata.data = xpkt.to_bytes()[:28]
+            icmppkt.icmpdata.origdgramlen = len(xpkt)
+
+        newpkt = ether + ippkt + icmppkt
+        if next_hop not in self.arp_mapping:
+            if next_hop in self.pending_pkts:
+                self.pending_pkts[next_hop].add(pkt)
+            else:
+                self.pending_pkts[next_hop] = PendingPackets(newpkt, time.time() - 2, 0, intf)
+        else:
+            self.forwarding_ip_packet(newpkt, intf, next_hop)
 
     def process_packet(self, pkt, input_port):
         if pkt.has_header(Arp):
@@ -135,7 +216,6 @@ class Router(object):
             time_now = time.time()
             remove_list = []
             for tar_ip_addr, pending_pkt in self.pending_pkts.items():
-                # import pdb; pdb.set_trace()
                 if pending_pkt.timestamp + 1 < time_now:  # time to broadcast again
                     if pending_pkt.count < 5:
                         pending_pkt.count += 1
@@ -143,24 +223,30 @@ class Router(object):
                         log_info('broadcast ARP req to {} {}th attempt'.format(tar_ip_addr, pending_pkt.count))
                         self.broadcast_arp_request(pending_pkt.out_intf, tar_ip_addr)
                     else:
+                        # import pdb; pdb.set_trace()
                         remove_list.append(tar_ip_addr)
-                        log_info('arp to {} failed five times. drop all packets'.format(tar_ip_addr))
-            for ipaddr in remove_list:
-                del self.pending_pkts[ipaddr]
+            for tar_ip_addr in remove_list:
+                pending_pkt = self.pending_pkts[tar_ip_addr]
+                for pkt in pending_pkt.pkts:
+                    self.send_icmp_error(pkt, ICMPType.DestinationUnreachable,
+                            ICMPCodeDestinationUnreachable.HostUnreachable)
+                log_info('arp to {} failed five times. drop all packets'.format(tar_ip_addr))
+                del self.pending_pkts[tar_ip_addr]
 
-            gotpkt = True
-            try:
-                timestamp,dev,pkt = self.net.recv_packet(timeout=Router.TIMEOUT_INTERVAL)
-            except NoPackets:
-                log_info("No packets available in recv_packet")
-                gotpkt = False
-            except Shutdown:
-                log_debug("Got shutdown signal")
-                break
+            if not remove_list:
+                gotpkt = True
+                try:
+                    timestamp,dev,pkt = self.net.recv_packet(timeout=Router.TIMEOUT_INTERVAL)
+                except NoPackets:
+                    log_info("No packets available in recv_packet")
+                    gotpkt = False
+                except Shutdown:
+                    log_debug("Got shutdown signal")
+                    break
 
-            if gotpkt:
-                log_debug("Got a packet: {}".format(str(pkt)))
-                self.process_packet(pkt, dev)
+                if gotpkt:
+                    log_debug("Got a packet: {}".format(str(pkt)))
+                    self.process_packet(pkt, dev)
 
 
 def main(net):

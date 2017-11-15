@@ -13,14 +13,14 @@ raw forward table:
 '''
 
 from switchyard.lib.userlib import *
-import time
+import time, copy
 
 class HostInterface(object):
     def __init__(self, eth_addr, ip_addr):
         self.eth_addr = eth_addr
         self.ip_addr = ip_addr
 
-def mk_pkt(hwsrc, hwdst, ipsrc, ipdst, reply=False, ttl=32):
+def mk_pkt(hwsrc, hwdst, ipsrc, ipdst, reply=False, ttl=64):
     ether = Ethernet(src=hwsrc, dst=hwdst, ethertype=EtherType.IP)
     ippkt = IPv4(src=ipsrc, dst=ipdst, protocol=IPProtocol.ICMP, ttl=ttl)
     icmppkt = ICMP()
@@ -28,6 +28,53 @@ def mk_pkt(hwsrc, hwdst, ipsrc, ipdst, reply=False, ttl=32):
         icmppkt.icmptype = ICMPType.EchoReply
     else:
         icmppkt.icmptype = ICMPType.EchoRequest
+    return ether + ippkt + icmppkt
+
+def mk_ping(hwsrc, hwdst, ipsrc, ipdst, reply=False, ttl=64, payload=''):
+    ether = Ethernet()
+    ether.src = EthAddr(hwsrc)
+    ether.dst = EthAddr(hwdst)
+    ether.ethertype = EtherType.IP
+    ippkt = IPv4()
+    ippkt.src = IPAddr(ipsrc)
+    ippkt.dst = IPAddr(ipdst)
+    ippkt.protocol = IPProtocol.ICMP
+    ippkt.ttl = ttl
+    ippkt.ipid = 0
+    if reply:
+        icmppkt = ICMP()
+        icmppkt.icmptype = ICMPType.EchoReply
+        icmppkt.icmpcode = ICMPCodeEchoReply.EchoReply
+    else:
+        icmppkt = ICMP()
+        icmppkt.icmptype = ICMPType.EchoRequest
+        icmppkt.icmpcode = ICMPCodeEchoRequest.EchoRequest
+    icmppkt.icmpdata.sequence = 42
+    icmppkt.icmpdata.data = payload
+    return ether + ippkt + icmppkt
+
+def mk_icmperr(hwsrc, hwdst, ipsrc, ipdst, xtype, xcode=0, origpkt=None, ttl=64):
+    ether = Ethernet()
+    ether.src = EthAddr(hwsrc)
+    ether.dst = EthAddr(hwdst)
+    ether.ethertype = EtherType.IP
+    ippkt = IPv4()
+    ippkt.src = IPAddr(ipsrc)
+    ippkt.dst = IPAddr(ipdst)
+    ippkt.protocol = IPProtocol.ICMP
+    ippkt.ttl = ttl
+    ippkt.ipid = 0
+    icmppkt = ICMP()
+    icmppkt.icmptype = xtype
+    icmppkt.icmpcode = xcode
+    if origpkt is not None:
+        xpkt = deepcopy(origpkt)
+        i = xpkt.get_header_index(Ethernet)
+        if i >= 0:
+            del xpkt[i]
+        icmppkt.icmpdata.data = xpkt.to_bytes()[:28]
+        icmppkt.icmpdata.origdgramlen = len(xpkt)
+
     return ether + ippkt + icmppkt
 
 def ip_forwarding_tests():
@@ -78,7 +125,7 @@ def ip_forwarding_tests():
     # the router should know hosts0[0]'s mac address
     pkt3 = mk_pkt(hosts1[0].eth_addr, intfs[1].ethaddr, hosts1[0].ip_addr, hosts0[0].ip_addr)
     s.expect(PacketInputEvent(intfs[1].name, pkt3, display=IPv4), "IP packet to be forward to {} should arrive on {}".format(hosts0[1].ip_addr, intfs[1].name))
-    pkt4 = mk_pkt(intfs[0].ethaddr, hosts0[0].eth_addr, hosts1[0].ip_addr, hosts0[0].ip_addr, ttl=31)
+    pkt4 = mk_pkt(intfs[0].ethaddr, hosts0[0].eth_addr, hosts1[0].ip_addr, hosts0[0].ip_addr, ttl=63)
     s.expect(PacketOutputEvent(intfs[0].name, pkt4, display=IPv4), "Router should forward IP packet to {} on {}".format(hosts0[0].ip_addr, intfs[0].name))
 
     '''
@@ -99,10 +146,10 @@ def ip_forwarding_tests():
     pkt9 = create_ip_arp_reply(hosts1[1].eth_addr, intfs[1].ethaddr, hosts1[1].ip_addr, intfs[1].ipaddr)
     s.expect(PacketInputEvent(intfs[1].name, pkt9, display=Arp), "Router should receive ARP response for {} on {}".format(hosts1[1].ip_addr, intfs[1].name))
     # now the router should sends all buffered packets
-    pkt10 = mk_pkt(intfs[1].ethaddr, hosts1[1].eth_addr, hosts0[0].ip_addr, hosts1[1].ip_addr, ttl=31)
+    pkt10 = mk_pkt(intfs[1].ethaddr, hosts1[1].eth_addr, hosts0[0].ip_addr, hosts1[1].ip_addr, ttl=63)
     s.expect(PacketOutputEvent(intfs[1].name, pkt10, display=IPv4), "IP packet should be forwarded to {} on {}".format(hosts1[1].ip_addr, intfs[1].name))
     s.expect(PacketOutputEvent(intfs[1].name, pkt10, display=IPv4), "IP packet should be forwarded to {} on {}".format(hosts1[1].ip_addr, intfs[1].name))
-    pkt11 = mk_pkt(intfs[1].ethaddr, hosts1[1].eth_addr, hosts2[0].ip_addr, hosts1[1].ip_addr, ttl=31)
+    pkt11 = mk_pkt(intfs[1].ethaddr, hosts1[1].eth_addr, hosts2[0].ip_addr, hosts1[1].ip_addr, ttl=63)
     s.expect(PacketOutputEvent(intfs[1].name, pkt11, display=IPv4), "IP packet should be forwarded to {} on {}".format(hosts1[1].ip_addr, intfs[1].name))
 
 
@@ -123,12 +170,12 @@ def ip_forwarding_tests():
     # reply
     pkt16 = create_ip_arp_reply('30:00:00:00:00:06', intfs[1].ethaddr, '10.10.1.254', intfs[1].ipaddr)
     s.expect(PacketInputEvent(intfs[1].name, pkt16, display=Arp), "Router should receive ARP response for {} on {}".format('10.10.1.254', intfs[1].name))
-    pkt17 = mk_pkt(intfs[1].ethaddr, '30:00:00:00:00:06', hosts0[1].ip_addr, hosts5[1].ip_addr, ttl=31)
+    pkt17 = mk_pkt(intfs[1].ethaddr, '30:00:00:00:00:06', hosts0[1].ip_addr, hosts5[1].ip_addr, ttl=63)
     s.expect(PacketOutputEvent(intfs[1].name, pkt17, display=IPv4), "Router should forward the packet to {} on {}".format(hosts5[1].ip_addr, intfs[1].name))
 
     pkt18 = create_ip_arp_reply('30:00:00:00:00:05', intfs[1].ethaddr, '10.10.0.254', intfs[1].ipaddr)
     s.expect(PacketInputEvent(intfs[1].name, pkt18, display=Arp), "Router should receive ARP response for {} on {}".format('10.10.0.254', intfs[1].name))
-    pkt19 = mk_pkt(intfs[1].ethaddr, '30:00:00:00:00:05', hosts0[0].ip_addr, hosts4[0].ip_addr, ttl=31)
+    pkt19 = mk_pkt(intfs[1].ethaddr, '30:00:00:00:00:05', hosts0[0].ip_addr, hosts4[0].ip_addr, ttl=63)
     s.expect(PacketOutputEvent(intfs[1].name, pkt19, display=IPv4), "Router should forward the packet to {} on {}".format(hosts4[0].ip_addr, intfs[1].name))
 
     '''
@@ -143,28 +190,67 @@ def ip_forwarding_tests():
     s.expect(PacketOutputEvent(intfs[1].name, pkt21, display=Arp), "Router should send ARP request for {} on {} for the second time".format(hosts1[2].ip_addr, intfs[1].name))
     pkt22 = mk_pkt(hosts2[0].eth_addr, intfs[2].ethaddr, hosts2[0].ip_addr, hosts4[2].ip_addr)
     s.expect(PacketInputEvent(intfs[2].name, pkt22, display=IPv4), "IP packet to be forward to {} should arrive on {}".format(hosts4[2].ip_addr, intfs[2].name))
-    pkt23 = mk_pkt(intfs[1].ethaddr, '30:00:00:00:00:05', hosts2[0].ip_addr, hosts4[2].ip_addr, ttl=31)
+    pkt23 = mk_pkt(intfs[1].ethaddr, '30:00:00:00:00:05', hosts2[0].ip_addr, hosts4[2].ip_addr, ttl=63)
     s.expect(PacketOutputEvent(intfs[1].name, pkt23, display=IPv4), "Router should forward the packet to {} on {}".format(hosts4[2].ip_addr, intfs[1].name))
     for i in range(3):
         s.expect(PacketInputTimeoutEvent(1), 'wait 1s.')
         s.expect(PacketOutputEvent(intfs[1].name, pkt21, display=Arp), "Router should send ARP request for {} on {} for the {}th time".format(hosts1[2].ip_addr, intfs[1].name, i+3))
     s.expect(PacketInputTimeoutEvent(1), 'wait 1s.')
 
+    pkt20_v1 = copy.deepcopy(pkt20)
+    pkt20_v1[IPv4].ttl = 63
+    pkt_e1 = mk_icmperr(intfs[0].ethaddr, hosts0[2].eth_addr, intfs[0].ipaddr,
+            hosts0[2].ip_addr, ICMPType.DestinationUnreachable,
+            ICMPCodeDestinationUnreachable.HostUnreachable, origpkt=pkt20_v1, ttl=64)
+    pkt_e1_arp_req = create_ip_arp_request(intfs[0].ethaddr, intfs[0].ipaddr, hosts0[2].ip_addr)
+    s.expect(PacketOutputEvent(intfs[0].name, pkt_e1_arp_req, display=Arp), "Router should send ARP request for {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
+    pkt_e2_arp_rpl = create_ip_arp_reply(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, intfs[0].ipaddr)
+    s.expect(PacketInputEvent(intfs[0].name, pkt_e2_arp_rpl, display=Arp), "Router should receive ARP response for {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
+    s.expect(PacketOutputEvent(intfs[0].name, pkt_e1, display=IPv4), "Router should send the ICMP error packet to {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
+
     # receive the ARP request, but too late to act
     pkt24 = create_ip_arp_reply(hosts1[2].eth_addr, intfs[1].ethaddr, hosts1[2].ip_addr, intfs[1].ipaddr)
     s.expect(PacketInputEvent(intfs[1].name, pkt24, display=Arp), "Router should receive ARP response for {} on {}".format(hosts1[2].ip_addr, intfs[1].name))
 
     '''
-    test case 5: Packets intended for the Router
+    test case 5: Packets intended for the Router (EchoReply)
     '''
     pkt25 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, intfs[1].ipaddr, reply=True)
-    s.expect(PacketInputEvent(intfs[0].name, pkt25, display=IPv4), "IP packet to be forward to {} should arrive on {}. This packet is intended for one interface of the router and should be dropped".format(hosts0[2].ip_addr, intfs[0].name))
+    s.expect(PacketInputEvent(intfs[0].name, pkt25, display=IPv4), "IP packet to be forward to {} should arrive on {}. This packet is intended for one interface of the router and should be dropped".format(pkt25[IPv4].dst, intfs[0].name))
+    pkt_e2 = mk_icmperr(intfs[0].ethaddr, hosts0[2].eth_addr, intfs[0].ipaddr,
+            hosts0[2].ip_addr, ICMPType.DestinationUnreachable,
+            ICMPCodeDestinationUnreachable.PortUnreachable, origpkt=pkt25, ttl=64)
+    s.expect(PacketOutputEvent(intfs[0].name, pkt_e2, display=IPv4), "Router should send the ICMP error packet to {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
 
     '''
     test case 6: Packets cannot find an out port in the forward table
     '''
-    pkt26 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, '192.168.40.20')
-    s.expect(PacketInputEvent(intfs[0].name, pkt26, display=IPv4), "IP packet to be forward to {} should arrive on {}. The destination ip addr is unknown and the packet should be dropped".format(hosts0[2].ip_addr, intfs[0].name))
+    pkt26 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, '192.168.40.20', ttl=1)
+    s.expect(PacketInputEvent(intfs[0].name, pkt26, display=IPv4), "IP packet to be forward to {} should arrive on {}. The destination ip addr is unknown and the packet should be dropped".format(pkt26[IPv4].dst, intfs[0].name))
+    pkt_e3 = mk_icmperr(intfs[0].ethaddr, hosts0[2].eth_addr, intfs[0].ipaddr,
+            hosts0[2].ip_addr, ICMPType.DestinationUnreachable,
+            ICMPCodeDestinationUnreachable.NetworkUnreachable, origpkt=pkt26, ttl=64)
+    s.expect(PacketOutputEvent(intfs[0].name, pkt_e3, display=IPv4), "Router should send the ICMP error packet to {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
+
+    '''
+    test case 7: TTL decreases to 0
+    '''
+    pkt27 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, hosts1[2].ip_addr, ttl=1)
+    s.expect(PacketInputEvent(intfs[0].name, pkt27, display=IPv4), "IP packet to be forward to {} should arrive on {}. The TTL=1 and the packet should be dropped".format(hosts1[2].ip_addr, intfs[0].name))
+    pkt27_v1 = copy.deepcopy(pkt27)
+    pkt27_v1[IPv4].ttl = 0
+    pkt_e4 = mk_icmperr(intfs[0].ethaddr, hosts0[2].eth_addr, intfs[0].ipaddr,
+            hosts0[2].ip_addr, ICMPType.TimeExceeded, ICMPCodeTimeExceeded.TTLExpired, origpkt=pkt27_v1, ttl=64)
+    s.expect(PacketOutputEvent(intfs[0].name, pkt_e4, display=IPv4), "Router should send the ICMP error packet to {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
+
+    '''
+    test case 8: Ping
+    '''
+    pkt28 = mk_ping(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, intfs[1].ipaddr, reply=False, ttl=64, payload='hello')
+    s.expect(PacketInputEvent(intfs[0].name, pkt28, display=IPv4), "IP packet to be forward to {} should arrive on {}. This packet is intended for one interface of the router with a ping request".format(pkt28[IPv4].dst, intfs[0].name))
+    pkt29 = mk_ping(intfs[0].ethaddr, hosts0[2].eth_addr, intfs[1].ipaddr,
+            hosts0[2].ip_addr, reply=True, ttl=64, payload='hello')
+    s.expect(PacketOutputEvent(intfs[0].name, pkt29, display=IPv4), "Router should send the ICMP echo packet to {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
 
     return s
 
