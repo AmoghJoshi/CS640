@@ -182,7 +182,7 @@ def ip_forwarding_tests():
     test case 4: ARP does not response
     '''
     pkt20 = mk_pkt(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, hosts1[2].ip_addr)
-    s.expect(PacketInputEvent(intfs[1].name, pkt20, display=IPv4), "IP packet to be forward to {} should arrive on {}".format(hosts1[2].ip_addr, intfs[1].name))
+    s.expect(PacketInputEvent(intfs[0].name, pkt20, display=IPv4), "IP packet to be forward to {} should arrive on {}".format(hosts1[2].ip_addr, intfs[0].name))
     pkt21 = create_ip_arp_request(intfs[1].ethaddr, intfs[1].ipaddr, hosts1[2].ip_addr)
     s.expect(PacketOutputEvent(intfs[1].name, pkt21, display=Arp), "Router should send ARP request for {} on {}".format(hosts1[2].ip_addr, intfs[1].name))
     # The ARP request is blocked, but other packets can go through
@@ -192,10 +192,21 @@ def ip_forwarding_tests():
     s.expect(PacketInputEvent(intfs[2].name, pkt22, display=IPv4), "IP packet to be forward to {} should arrive on {}".format(hosts4[2].ip_addr, intfs[2].name))
     pkt23 = mk_pkt(intfs[1].ethaddr, '30:00:00:00:00:05', hosts2[0].ip_addr, hosts4[2].ip_addr, ttl=63)
     s.expect(PacketOutputEvent(intfs[1].name, pkt23, display=IPv4), "Router should forward the packet to {} on {}".format(hosts4[2].ip_addr, intfs[1].name))
+    # Another packet to hosts1[2], should not broadcast ARP request for the second time
+    pkt20_2 = mk_pkt(hosts0[0].eth_addr, intfs[0].ethaddr, hosts0[0].ip_addr, hosts1[2].ip_addr)
+    s.expect(PacketInputEvent(intfs[0].name, pkt20_2, display=IPv4), "IP packet to be forward to {} should arrive on {}".format(hosts1[2].ip_addr, intfs[0].name))
+
     for i in range(3):
         s.expect(PacketInputTimeoutEvent(1), 'wait 1s.')
         s.expect(PacketOutputEvent(intfs[1].name, pkt21, display=Arp), "Router should send ARP request for {} on {} for the {}th time".format(hosts1[2].ip_addr, intfs[1].name, i+3))
     s.expect(PacketInputTimeoutEvent(1), 'wait 1s.')
+
+    pkt20_v2 = copy.deepcopy(pkt20_2)
+    pkt20_v2[IPv4].ttl = 63
+    pkt_e2 = mk_icmperr(intfs[0].ethaddr, hosts0[0].eth_addr, intfs[0].ipaddr,
+            hosts0[0].ip_addr, ICMPType.DestinationUnreachable,
+            ICMPCodeDestinationUnreachable.HostUnreachable, origpkt=pkt20_v2, ttl=64)
+
 
     pkt20_v1 = copy.deepcopy(pkt20)
     pkt20_v1[IPv4].ttl = 63
@@ -204,6 +215,7 @@ def ip_forwarding_tests():
             ICMPCodeDestinationUnreachable.HostUnreachable, origpkt=pkt20_v1, ttl=64)
     pkt_e1_arp_req = create_ip_arp_request(intfs[0].ethaddr, intfs[0].ipaddr, hosts0[2].ip_addr)
     s.expect(PacketOutputEvent(intfs[0].name, pkt_e1_arp_req, display=Arp), "Router should send ARP request for {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
+    s.expect(PacketOutputEvent(intfs[0].name, pkt_e2, display=IPv4), "Router should send the ICMP error packet to {} on {}".format(hosts0[0].ip_addr, intfs[0].name))
     pkt_e2_arp_rpl = create_ip_arp_reply(hosts0[2].eth_addr, intfs[0].ethaddr, hosts0[2].ip_addr, intfs[0].ipaddr)
     s.expect(PacketInputEvent(intfs[0].name, pkt_e2_arp_rpl, display=Arp), "Router should receive ARP response for {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
     s.expect(PacketOutputEvent(intfs[0].name, pkt_e1, display=IPv4), "Router should send the ICMP error packet to {} on {}".format(hosts0[2].ip_addr, intfs[0].name))
