@@ -2,7 +2,7 @@
 
 from switchyard.lib.address import *
 from switchyard.lib.packet import *
-from switchyard.lib.common import *
+from switchyard.lib.logging import *
 from threading import *
 import time
 from copy import deepcopy
@@ -43,7 +43,7 @@ def switchy_main(net):
     while True:
         gotpkt = True
         try:
-            dev,pkt = net.recv_packet()
+            timestamp,dev,pkt = net.recv_packet(timeout=0.15)
             log_debug("Device is {}".format(dev))
         except NoPackets:
             log_debug("No packets available in recv_packet")
@@ -55,13 +55,16 @@ def switchy_main(net):
         if gotpkt:
             log_debug("I got a packet from {}".format(dev))
             log_debug("Pkt: {}".format(pkt))
+            if pkt.num_headers() < 4 or type(pkt[1]) is not IPv4 or type(pkt[2]) is not UDP or type(pkt[3]) is not RawPacketContents:
+                continue
 
-            bytes_data = pkt[RawPacketContents].to_bytes()
+            bytes_data = pkt[3].to_bytes()
             seq_num, length, payload = unpack_data_bytes(bytes_data)
+            log_info("I got a packet seq num={}".format(seq_num))
 
             ack_pkt = deepcopy(pkt)
             # modify ethaddr
-            ack_pkt[Ethernet].src = my_intf.interface_by_name("blastee-eth0").ethaddr
+            ack_pkt[Ethernet].src = net.interface_by_name("blastee-eth0").ethaddr
             ack_pkt[Ethernet].dst = mac_mapping['middlebox-eth1']
             # modify ipaddr
             iphdr = ack_pkt[IPv4]
@@ -69,8 +72,9 @@ def switchy_main(net):
             # modify udp
             udphdr = ack_pkt[UDP]
             udphdr.src, udphdr.dst = udphdr.dst, udphdr.src
-            ack_pkt[RawPacketContents] = RawPacketContents(
-                    pack_ack_bytes(seq_num, payload))
+            ack_bytes = pack_ack_bytes(seq_num, payload)
+            ack_pkt[3] = RawPacketContents(ack_bytes)
+            log_info("Send the ack seq num={}".format(seq_num))
             net.send_packet("blastee-eth0", ack_pkt)
 
     net.shutdown()
