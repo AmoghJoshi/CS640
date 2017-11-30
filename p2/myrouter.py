@@ -103,6 +103,17 @@ class Router(object):
                 intf = self.net.interface_by_name(eth_port)
         return intf, next_hop
 
+    def lookup_arp_and_send(self, next_hop, intf, pkt):
+        if next_hop not in self.arp_mapping:
+            if next_hop in self.pending_pkts:
+                self.pending_pkts[next_hop].add(pkt)
+            else:
+                log_info('broadcast ARP req to {} {}th attempt'.format(next_hop, 1))
+                self.broadcast_arp_request(intf, next_hop);
+                self.pending_pkts[next_hop] = PendingPackets(pkt, time.time(), 1, intf)
+        else:
+            self.forwarding_ip_packet(pkt, intf, next_hop)
+
     def process_ipv4(self, pkt, input_port):
         ip_hdr = pkt.get_header(IPv4)
         if ip_hdr.dst in self.ipaddrs:
@@ -126,14 +137,7 @@ class Router(object):
             self.send_icmp_error(pkt, ICMPType.TimeExceeded,
                    ICMPCodeTimeExceeded.TTLExpired)
             return
-
-        if next_hop not in self.arp_mapping:
-            if next_hop in self.pending_pkts:
-                self.pending_pkts[next_hop].add(pkt)
-            else:
-                self.pending_pkts[next_hop] = PendingPackets(pkt, time.time() - 2, 0, intf)
-        else:
-            self.forwarding_ip_packet(pkt, intf, next_hop)
+        self.lookup_arp_and_send(next_hop, intf, pkt)
 
     def process_icmp(self, pkt, input_port):
         icmp_hdr = pkt.get_header(ICMP)
@@ -152,13 +156,7 @@ class Router(object):
             intf, next_hop = self.make_forward_decision(ip_hdr.dst)
             if next_hop is None:
                 return
-            if next_hop not in self.arp_mapping:
-                if next_hop in self.pending_pkts:
-                    self.pending_pkts[next_hop].add(pkt)
-                else:
-                    self.pending_pkts[next_hop] = PendingPackets(pkt, time.time() - 2, 0, intf)
-            else:
-                self.forwarding_ip_packet(pkt, intf, next_hop)
+        self.lookup_arp_and_send(next_hop, intf, pkt)
 
     def send_icmp_error(self, origpkt, icmptype, icmpcode):
         origip = origpkt[IPv4]
@@ -187,13 +185,7 @@ class Router(object):
             icmppkt.icmpdata.origdgramlen = len(xpkt)
 
         newpkt = ether + ippkt + icmppkt
-        if next_hop not in self.arp_mapping:
-            if next_hop in self.pending_pkts:
-                self.pending_pkts[next_hop].add(pkt)
-            else:
-                self.pending_pkts[next_hop] = PendingPackets(newpkt, time.time() - 2, 0, intf)
-        else:
-            self.forwarding_ip_packet(newpkt, intf, next_hop)
+        self.lookup_arp_and_send(next_hop, intf, newpkt)
 
     def process_packet(self, pkt, input_port):
         if pkt.has_header(Arp):
@@ -227,6 +219,7 @@ class Router(object):
                         remove_list.append(tar_ip_addr)
             for tar_ip_addr in remove_list:
                 pending_pkt = self.pending_pkts[tar_ip_addr]
+                # import pdb; pdb.set_trace()
                 for pkt in pending_pkt.pkts:
                     self.send_icmp_error(pkt, ICMPType.DestinationUnreachable,
                             ICMPCodeDestinationUnreachable.HostUnreachable)
