@@ -50,6 +50,7 @@ def switchy_main(net):
             break
 
         if gotpkt:
+            log_debug("Receive packet {}".format(pkt))
             if pkt.num_headers() < 4 or type(pkt[1]) is not IPv4 or type(pkt[2]) is not UDP or type(pkt[3]) is not RawPacketContents:
                 continue
 

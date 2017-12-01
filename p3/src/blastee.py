@@ -56,6 +56,7 @@ def switchy_main(net):
             log_debug("I got a packet from {}".format(dev))
             log_debug("Pkt: {}".format(pkt))
             if pkt.num_headers() < 4 or type(pkt[1]) is not IPv4 or type(pkt[2]) is not UDP or type(pkt[3]) is not RawPacketContents:
+                log_info("Receive unexpected packet {}".format(pkt))
                 continue
 
             bytes_data = pkt[3].to_bytes()
