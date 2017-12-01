@@ -62,6 +62,7 @@ def switchy_main(net):
     RHS = 1     # next pkt to send
     time_lhs_stuck = time.time()
     while LHS < opts['num_pkts'] + 1:
+        sentpkt = False
         gotpkt = True
         try:
             #Timeout value will be parameterized!
@@ -100,23 +101,26 @@ def switchy_main(net):
             current_time = time.time()
             if time_lhs_stuck + opts['timeout'] < current_time:
                 num_coarse_timeout += 1
-                log_debug('timeout happens at {}. number of coarse TOs'.format(current_time, num_coarse_timeout))
-                time_lhs_stuck = current_time       # TODO: need to rethink it
+                log_debug('timeout happens at {}. number of coarse TOs = {}'.format(current_time, num_coarse_timeout))
+                time_lhs_stuck = current_time
                 # enqueue all pending packets
                 kvs = sorted(pending_pkts_map.items())
                 for k, v in kvs:
                     retranmit_queue.put(k)
 
-            if retranmit_queue.qsize() > 0:
+            seqnum = -1
+            while retranmit_queue.qsize() > 0 and seqnum not in pending_pkts_map:
                 seqnum = retranmit_queue.get()
-                if seqnum in pending_pkts_map:
-                    retx_pkt = pending_pkts_map[seqnum]
-                    log_debug("retransmit packet seqnum={}".format(seqnum))
-                    size_Tx += len(retx_pkt[3].to_bytes())
-                    num_reTx += 1
-                    net.send_packet("blaster-eth0", pending_pkts_map[seqnum])
+            if seqnum in pending_pkts_map:
+                retx_pkt = pending_pkts_map[seqnum]
+                log_debug("retransmit packet seqnum={}".format(seqnum))
+                size_Tx += len(retx_pkt[3].to_bytes())
+                num_reTx += 1
+                net.send_packet("blaster-eth0", pending_pkts_map[seqnum])
+                sentpkt = True
 
-            elif RHS + 1 - LHS <= opts['window'] and RHS <= opts['num_pkts']:
+            log_debug('resent packet={}, RHS = {}, LHS = {}'.format(sentpkt, RHS, LHS))
+            if not sentpkt and RHS + 1 - LHS <= opts['window'] and RHS <= opts['num_pkts']:
                 '''
                 Creating the headers for the packet
                 '''
