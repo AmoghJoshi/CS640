@@ -45,6 +45,9 @@ def pack_data_bytes(seq_num, payload):
     return seq_bytes + length_bytes + payload_bytes
 
 def switchy_main(net):
+    start_time = time.time()
+    num_reTx, num_coarse_timeout = 0, 0
+    size_Tx, size_good_Tx = 0, 0
     my_intf = net.interfaces()
     mymacs = [intf.ethaddr for intf in my_intf]
     myips = [intf.ipaddr for intf in my_intf]
@@ -78,6 +81,13 @@ def switchy_main(net):
             bytes_data = pkt[3].to_bytes()
             seq_num, payload = unpack_ack_bytes(bytes_data)
             log_info("I got an ack seq num={}".format(seq_num))
+            print('stats:')
+            total_time = time.time() - start_time
+            print('Total TX time (seconds): {}'.format(total_time))
+            print('Number of reTx: {}'.format(num_reTx))
+            print('Number of coarse TOs: {}'.format(num_coarse_timeout))
+            print('Throughput (Bps): {}'.format(size_Tx / total_time))
+            print('Goodput (Bps): {}'.format(size_good_Tx / total_time))
             if seq_num in pending_pkts_map:
                 del pending_pkts_map[seq_num]
             old_LHS = LHS
@@ -86,10 +96,11 @@ def switchy_main(net):
                 time_lhs_stuck = time.time()
 
         else:
-            log_info("Didn't receive anything")
+            log_debug("Didn't receive anything")
             current_time = time.time()
             if time_lhs_stuck + opts['timeout'] < current_time:
-                log_info('timeout happens at {}'.format(current_time))
+                num_coarse_timeout += 1
+                log_debug('timeout happens at {}. number of coarse TOs'.format(current_time, num_coarse_timeout))
                 time_lhs_stuck = current_time       # TODO: need to rethink it
                 # enqueue all pending packets
                 kvs = sorted(pending_pkts_map.items())
@@ -98,9 +109,12 @@ def switchy_main(net):
 
             if retranmit_queue.qsize() > 0:
                 seqnum = retranmit_queue.get()
-                log_info("retransmit packet seqnum={}".format(seqnum))
-                net.send_packet("blaster-eth0", pending_pkts_map[seqnum])
-
+                if seqnum in pending_pkts_map:
+                    retx_pkt = pending_pkts_map[seqnum]
+                    log_debug("retransmit packet seqnum={}".format(seqnum))
+                    size_Tx += len(retx_pkt[3].to_bytes())
+                    num_reTx += 1
+                    net.send_packet("blaster-eth0", pending_pkts_map[seqnum])
 
             elif RHS + 1 - LHS <= opts['window'] and RHS <= opts['num_pkts']:
                 '''
@@ -110,7 +124,9 @@ def switchy_main(net):
                         ethertype=EtherType.IP)
                 ip_hdr = IPv4(src=myips[0], dst=opts['blastee_ip'], protocol=IPProtocol.UDP, ttl=64)
                 udp_hdr = UDP(src=8080, dst=80)
-                contents_hdr = RawPacketContents(pack_data_bytes(RHS, 'hello cs640'))
+                contents_hdr = RawPacketContents(pack_data_bytes(RHS, 'a' * opts['length']))
+                size_Tx += len(contents_hdr.to_bytes())
+                size_good_Tx += len(contents_hdr.to_bytes())
                 pkt = eth_hdr + ip_hdr + udp_hdr + contents_hdr
                 '''
                 Do other things here and send packet
@@ -118,7 +134,7 @@ def switchy_main(net):
                 pending_pkts_map[RHS] = pkt
                 RHS += 1
                 net.send_packet("blaster-eth0", pkt)
-                log_info("send packet seqnum={}".format(RHS-1))
+                log_debug("send packet seqnum={}".format(RHS-1))
 
-    log_info('exiting. LHS={}, RHS={}'.format(LHS, RHS))
+    log_debug('exiting. LHS={}, RHS={}'.format(LHS, RHS))
     net.shutdown()
